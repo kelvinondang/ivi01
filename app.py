@@ -10,8 +10,29 @@ import pandas as pd
 import numpy as np
 
 # ---------------------- App / Keys ----------------------
-st.set_page_config(page_title="Store Assistant — Furniture", page_icon="🛋️", layout="wide")
+st.set_page_config(page_title="Store Assistant — Furniture", page_icon="🛋️", layout="wide", initial_sidebar_state="collapsed")
 load_dotenv()
+
+IS_PROD = bool(st.secrets.get("GOOGLE_API_KEY"))  # running on Streamlit Cloud with server key
+ADMIN_PIN = st.secrets.get("ADMIN_PIN", "")       # optional: set in Secrets to enable admin link
+try:
+    admin_token = st.query_params.get("admin", "")
+except Exception:
+    admin_token = st.experimental_get_query_params().get("admin", [""])[0] if st.experimental_get_query_params() else ""
+ADMIN = (ADMIN_PIN and admin_token == ADMIN_PIN)
+
+SHOW_SIDEBAR = not (IS_PROD and not ADMIN)  # hide sidebar for the public
+
+if not SHOW_SIDEBAR:
+    st.markdown("""
+    <style>
+      [data-testid="stSidebar"] {display: none !important;}
+      [data-testid="stSidebarNav"] {display: none !important;}
+      [data-testid="stSidebarCollapseButton"] {display: none !important;}
+      [data-testid="collapsedControl"] {display: none !important;}
+      .block-container {padding-left: 2rem; padding-right: 2rem;}
+    </style>
+    """, unsafe_allow_html=True)
 
 st.title("🛋️ Store Assistant — Furniture (Gemini + RAG)")
 
@@ -22,20 +43,34 @@ if "history" not in st.session_state:
 DEFAULT_MODEL = "gemini-1.5-flash"
 api_key = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY", "")
 
-with st.sidebar:
-    st.subheader("🔑 API & Settings")
-    api_key = st.text_input(
-        "GOOGLE_API_KEY",
-        value=api_key,
-        type="password",
-        help="Paste your Gemini API key. Use .env locally, Secrets on Streamlit Cloud.",
-    )
-    model_name = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
-    temperature = st.slider("Creativity (temperature)", 0.0, 1.0, 0.2, 0.1)
-    max_tokens = st.slider("Max output tokens", 256, 4096, 1024, 64)
-    st.caption("Tip: Flash = fast & cheap. Pro = better reasoning.")
-    st.divider()
-    if st.button("🧹 Clear chat"):
+# Always read the key from Secrets/env first
+api_key = (st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY") or "")
+if not api_key:
+    st.error("Missing API key. Set GOOGLE_API_KEY in Secrets.")
+    st.stop()
+genai.configure(api_key=api_key)
+
+# Defaults if we hide the sidebar
+model_name = "gemini-1.5-flash"
+temperature = 0.2
+max_tokens = 1024
+
+if SHOW_SIDEBAR:
+    with st.sidebar:
+        st.subheader("🔑 API & Settings")
+        st.success("Using server API key from Secrets ✅")
+        st.text_input("GOOGLE_API_KEY", value="••••••••••••", type="password", disabled=True)
+        model_name = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
+        temperature = st.slider("Creativity (temperature)", 0.0, 1.0, 0.2, 0.1)
+        max_tokens = st.slider("Max output tokens", 256, 4096, 1024, 64)
+        st.caption("Tip: Flash = fast & cheap. Pro = better reasoning.")
+        st.divider()
+        if st.button("🧹 Clear chat"):
+            st.session_state["history"].clear()
+            st.rerun()
+else:
+    # Put a small clear button on the main page so users still can reset
+    if st.button("🧹 Clear chat", key="clear_main"):
         st.session_state["history"].clear()
         st.rerun()
 
@@ -188,6 +223,13 @@ with tab_chat:
     cols = st.columns([2, 1])
 
     with cols[0]:
+            # --- show recent conversation (optional UI) ---
+        st.caption("Percakapan terbaru")
+        for m in st.session_state["history"][-6:]:
+                role = "🧑" if m["role"] == "user" else "🤖"
+                st.markdown(f"**{role} {m['role'].title()}:** {m['parts'][0]}")
+        st.divider()
+
         user_query = st.text_area(
             "Ask anything (e.g., 'sofa untuk ruangan 3x4 meter, beige, modern, budget 5–7 juta')",
             height=120,
@@ -217,7 +259,9 @@ with tab_chat:
                 "You are a helpful retail assistant for a furniture store. "
                 "Use the provided 'CATALOG CONTEXT' as the primary source for recommendations. "
                 "Cite product names and include product_url links from the context when recommending. "
-                "Be concise, prefer bullet points, and explain why each item fits the user's room and constraints."
+                "Be concise, prefer bullet points, and explain why each item fits the user's room and constraints. "
+                "Reply in the SAME LANGUAGE as the user's latest message. "
+                "If the user writes in Indonesian, reply fully in Bahasa Indonesia."
             )
 
             prompt = (
